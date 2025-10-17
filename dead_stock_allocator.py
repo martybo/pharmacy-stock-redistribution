@@ -151,7 +151,13 @@ def build_product_blocks(df, store_columns):
 
 
 # ---------- Allocation ----------
-def allocate_for_product(row, source_store: str, store_to_am: Dict[str, str], stores: List[str]):
+def allocate_for_product(
+    row,
+    source_store: str,
+    store_to_am: Dict[str, str],
+    stores: List[str],
+    am_override: Dict[str, str] = None,
+):
     avail = row.get(f"st::{source_store}", np.nan)
     if pd.isna(avail) or avail <= 0:
         return []
@@ -175,6 +181,25 @@ def allocate_for_product(row, source_store: str, store_to_am: Dict[str, str], st
 
     allocations = []
     remaining = avail
+
+    def am_lookup(store: str) -> str:
+        if not store:
+            return ""
+        store_clean = store.strip()
+        store_lower = store_clean.lower()
+        if am_override:
+            if store_lower in am_override:
+                return am_override[store_lower]
+        if store_to_am:
+            if store_clean in store_to_am:
+                return store_to_am[store_clean]
+            if store_lower in store_to_am:
+                return store_to_am[store_lower]
+            # Fall back to case-insensitive lookup
+            for key in store_to_am.keys():
+                if key.strip().lower() == store_lower:
+                    return store_to_am[key]
+        return ""
 
     # 1) NHD priority
     nhd = f"{source_store} NHD"
@@ -217,9 +242,24 @@ def allocate_for_product(row, source_store: str, store_to_am: Dict[str, str], st
 
     # NOTE: AM fairness and priority are handled later when we label reason.
     # Here we only spread by need (usage & capacity).
-    for s, q in spread(candidates, remaining):
+    src_am = am_lookup(source_store)
+    same_am_candidates = []
+    cross_am_candidates = []
+    for cand in candidates:
+        dest_am = am_lookup(cand[0])
+        if src_am and dest_am and src_am == dest_am:
+            same_am_candidates.append(cand)
+        else:
+            cross_am_candidates.append(cand)
+
+    for s, q in spread(same_am_candidates, remaining):
         allocations.append((s, q, ""))  # reason will be set later
         remaining -= q
+
+    if remaining > 0:
+        for s, q in spread(cross_am_candidates, remaining):
+            allocations.append((s, q, ""))  # reason will be set later
+            remaining -= q
 
     return allocations
 
@@ -310,7 +350,7 @@ def main():
                 continue
 
             unit = stv / stp if (pd.notna(stv) and stv > 0) else np.nan
-            allocs = allocate_for_product(row, src, store_to_am_heur, stores)
+            allocs = allocate_for_product(row, src, store_to_am_heur, stores, am_override)
 
             total = 0
             for dest, qty, note_tmp in allocs:
